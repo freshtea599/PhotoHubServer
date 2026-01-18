@@ -15,19 +15,19 @@ type Config struct {
 	DBUser     string
 	DBPassword string
 	DBName     string
+	JWTSecret  string
 }
 
 func Load() (*Config, error) {
 	_ = godotenv.Load()
 
-	portStr := getEnv("SERVER_PORT", "8080")
+	portStr := getEnv("SERVER_PORT", "3000")
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
 		return nil, err
 	}
 
 	env := getEnv("SERVER_ENV", "development")
-
 	dbPort, _ := strconv.Atoi(getEnv("DB_PORT", "5432"))
 
 	return &Config{
@@ -38,6 +38,7 @@ func Load() (*Config, error) {
 		DBUser:     getEnv("DB_USER", "postgres"),
 		DBPassword: getEnv("DB_PASSWORD", "postgres"),
 		DBName:     getEnv("DB_NAME", "photohub"),
+		JWTSecret:  getEnv("JWT_SECRET", "your-secret-key-change-in-production"),
 	}, nil
 }
 

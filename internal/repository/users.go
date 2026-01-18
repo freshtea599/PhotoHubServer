@@ -1,45 +1,104 @@
 package repository
 
 import (
+	"database/sql"
 	"errors"
-	"sync"
 
 	"github.com/freshtea599/PhotoHubServer.git/internal/models"
+	"golang.org/x/crypto/bcrypt"
 )
 
-var ErrUserNotFound = errors.New("user not found")
-
 type UserRepository struct {
-	mu     sync.RWMutex
-	data   []models.User
-	nextID int64
+	db *sql.DB
 }
 
-func NewUserRepository() *UserRepository {
-	return &UserRepository{
-		data:   make([]models.User, 0),
-		nextID: 1,
+func NewUserRepository(db *sql.DB) *UserRepository {
+	return &UserRepository{db: db}
+}
+
+// HashPassword хеширует пароль
+func hashPassword(password string) (string, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	return string(hash), err
+}
+
+// CheckPassword проверяет пароль
+func checkPassword(hash, password string) bool {
+	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+	return err == nil
+}
+
+// Create создаёт нового пользователя
+func (r *UserRepository) Create(email, password, username string) (*models.User, error) {
+	hashedPassword, err := hashPassword(password)
+	if err != nil {
+		return nil, err
 	}
+
+	var user models.User
+	err = r.db.QueryRow(
+		`INSERT INTO users (email, password_hash, username, created_at, updated_at) 
+		 VALUES ($1, $2, $3, NOW(), NOW()) 
+		 RETURNING id, email, username, created_at, updated_at`,
+		email, hashedPassword, username,
+	).Scan(&user.ID, &user.Email, &user.Username, &user.CreatedAt, &user.UpdatedAt)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &user, nil
 }
 
-func (r *UserRepository) Create(u models.User) models.User {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+// GetByEmail получает пользователя по email
+func (r *UserRepository) GetByEmail(email string) (*models.User, string, error) {
+	var user models.User
+	var passwordHash string
 
-	u.ID = r.nextID
-	r.nextID++
-	r.data = append(r.data, u)
-	return u
-}
+	err := r.db.QueryRow(
+		`SELECT id, email, username, is_admin, password_hash, created_at, updated_at
+		 FROM users WHERE email = $1`,
+		email,
+	).Scan(&user.ID, &user.Email, &user.Username, &user.IsAdmin, &passwordHash, &user.CreatedAt, &user.UpdatedAt)
 
-func (r *UserRepository) GetByID(id int64) (models.User, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	for _, u := range r.data {
-		if u.ID == id {
-			return u, nil
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, "", errors.New("user not found")
 		}
+		return nil, "", err
 	}
-	return models.User{}, ErrUserNotFound
+
+	return &user, passwordHash, nil
+}
+
+// GetByID получает пользователя по ID
+func (r *UserRepository) GetByID(id int64) (*models.User, error) {
+	var user models.User
+	err := r.db.QueryRow(
+		`SELECT id, email, username, is_admin, created_at, updated_at
+		 FROM users WHERE id = $1`,
+		id,
+	).Scan(&user.ID, &user.Email, &user.Username, &user.IsAdmin, &user.CreatedAt, &user.UpdatedAt)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, errors.New("user not found")
+		}
+		return nil, err
+	}
+	return &user, nil
+}
+
+// CheckPassword проверяет пароль пользователя
+func (r *UserRepository) CheckPassword(email, password string) (*models.User, error) {
+	user, hash, err := r.GetByEmail(email)
+	if err != nil {
+		return nil, err
+	}
+
+	if !checkPassword(hash, password) {
+		return nil, errors.New("invalid password")
+	}
+
+	return user, nil
 }
