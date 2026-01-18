@@ -7,29 +7,36 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
 	"github.com/freshtea599/PhotoHubServer.git/internal/auth"
+	"github.com/freshtea599/PhotoHubServer.git/internal/config"
 	"github.com/freshtea599/PhotoHubServer.git/internal/models"
 	"github.com/freshtea599/PhotoHubServer.git/internal/repository"
 )
 
+// Handlers содержит все обработчики + конфиг для фиче-флагов
 type Handlers struct {
+	cfg         *config.Config
 	jwtManager  *auth.JWTManager
 	userRepo    *repository.UserRepository
 	photoRepo   *repository.PhotoRepository
 	commentRepo *repository.CommentRepository
 }
 
+// NewHandlers создаёт новый экземпляр обработчиков
 func NewHandlers(
+	cfg *config.Config,
 	jwtManager *auth.JWTManager,
 	userRepo *repository.UserRepository,
 	photoRepo *repository.PhotoRepository,
 	commentRepo *repository.CommentRepository,
 ) *Handlers {
 	return &Handlers{
+		cfg:         cfg,
 		jwtManager:  jwtManager,
 		userRepo:    userRepo,
 		photoRepo:   photoRepo,
@@ -60,6 +67,14 @@ func isAdminUser(u *models.User) bool {
 		return false
 	}
 	return u.IsAdmin
+}
+
+// processImageVariants заглушка для обработки изображений
+// TODO: реализовать ресайз + конвертацию в webp позже
+func (h *Handlers) processImageVariants(photoID int64, originalPath string, ext string) error {
+	// Пока ничего не делаем, но функция уже существует
+	// Это позволяет включать/выключать флаг без ошибок компиляции
+	return nil
 }
 
 // ---------- auth ----------
@@ -135,7 +150,7 @@ func (h *Handlers) GetMe(c echo.Context) error {
 
 // ---------- photos ----------
 
-// UploadPhoto загружает новое фото
+// UploadPhoto загружает новое фото с поддержкой фиче-флагов
 func (h *Handlers) UploadPhoto(c echo.Context) error {
 	userID, ok := getUserID(c)
 	if !ok {
@@ -147,9 +162,9 @@ func (h *Handlers) UploadPhoto(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "photo file is required"})
 	}
 
-	// max 10MB
-	if file.Size > 10*1024*1024 {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "photo size must not exceed 10MB"})
+	// Лимит 50MB для 4K тестов
+	if file.Size > 50*1024*1024 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "photo size must not exceed 50MB"})
 	}
 
 	allowedTypes := map[string]bool{
@@ -169,34 +184,49 @@ func (h *Handlers) UploadPhoto(c echo.Context) error {
 	}
 	defer src.Close()
 
-	_ = os.MkdirAll("uploads", 0755)
+	// Структура папок
+	_ = os.MkdirAll("uploads/originals", 0755)
+	_ = os.MkdirAll("uploads/variants", 0755)
 
-	fileName := uuid.New().String() + filepath.Ext(file.Filename)
-	filePath := filepath.Join("uploads", fileName)
+	ext := strings.ToLower(filepath.Ext(file.Filename))
+	if ext == "" {
+		// fallback по mimeType
+		switch mimeType {
+		case "image/jpeg":
+			ext = ".jpg"
+		case "image/png":
+			ext = ".png"
+		case "image/gif":
+			ext = ".gif"
+		case "image/webp":
+			ext = ".webp"
+		}
+	}
 
-	dst, err := os.Create(filePath)
+	// 1) Сохраняем оригинал
+	baseName := uuid.New().String()
+	originalRelPath := filepath.Join("uploads", "originals", baseName+ext)
+	originalAbsPath := originalRelPath
+
+	dst, err := os.Create(originalAbsPath)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to save file"})
 	}
-	defer dst.Close()
-
 	if _, err := io.Copy(dst, src); err != nil {
-		_ = os.Remove(filePath)
+		_ = dst.Close()
+		_ = os.Remove(originalAbsPath)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to copy file"})
 	}
+	_ = dst.Close()
 
 	description := c.FormValue("description")
+	isPublic := c.FormValue("is_public") == "true" || c.FormValue("ispublic") == "true"
 
-	// поддержка обоих вариантов: is_public и ispublic
-	isPublic := false
-	if c.FormValue("is_public") == "true" || c.FormValue("ispublic") == "true" {
-		isPublic = true
-	}
-
+	// 2) Пишем в БД
 	photo := &models.Photo{
 		UserID:      userID,
-		URL:         "/" + filePath,
-		FilePath:    filePath,
+		URL:         "/" + filepath.ToSlash(originalRelPath),
+		FilePath:    originalRelPath,
 		FileSize:    sql.NullInt64{Int64: file.Size, Valid: true},
 		MimeType:    mimeType,
 		Description: description,
@@ -205,14 +235,30 @@ func (h *Handlers) UploadPhoto(c echo.Context) error {
 
 	savedPhoto, err := h.photoRepo.Create(photo)
 	if err != nil {
-		_ = os.Remove(filePath)
+		_ = os.Remove(originalAbsPath)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to save photo to database"})
+	}
+
+	// 3) Опционально запускаем оптимизацию (фиче-флаги)
+	if h.cfg.ImagePipelineOn {
+		if h.cfg.AsyncProcessing {
+			// Асинхронно (не блокируем ответ)
+			go func(photoID int64, path string, ext string) {
+				_ = h.processImageVariants(photoID, path, ext)
+			}(savedPhoto.ID, originalAbsPath, ext)
+		} else {
+			// Синхронно (для тестов/бенчмарков)
+			if err := h.processImageVariants(savedPhoto.ID, originalAbsPath, ext); err != nil {
+				// Логируем но не валим загрузку
+				// log.Printf("image pipeline failed: %v", err)
+			}
+		}
 	}
 
 	return c.JSON(http.StatusCreated, savedPhoto)
 }
 
-// ListPhotos получает публичные фото (в твоей логике — только одобренные, если так сделано в repo)
+// ListPhotos получает публичные фото
 func (h *Handlers) ListPhotos(c echo.Context) error {
 	limit := 20
 	offset := 0
@@ -236,7 +282,7 @@ func (h *Handlers) ListPhotos(c echo.Context) error {
 	return c.JSON(http.StatusOK, photos)
 }
 
-// ListMyPhotos получает все фото текущего пользователя (включая приватные)
+// ListMyPhotos получает все фото текущего пользователя
 func (h *Handlers) ListMyPhotos(c echo.Context) error {
 	userID, ok := getUserID(c)
 	if !ok {
@@ -335,9 +381,8 @@ func (h *Handlers) DeletePhoto(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, map[string]string{"error": "you can only delete your own photos"})
 	}
 
-	// удаляем файл (не критично, если уже нет)
 	if err := os.Remove(photo.FilePath); err != nil && !os.IsNotExist(err) {
-		// можно логировать, но не валим запрос
+		// логируем но не валим запрос
 	}
 
 	if err := h.photoRepo.Delete(id); err != nil {
@@ -419,14 +464,14 @@ func (h *Handlers) IsPhotoLiked(c echo.Context) error {
 
 // ---------- comments ----------
 
-// GetComments получает комментарии фото (доступно публично, user_id может отсутствовать)
+// GetComments получает комментарии фото
 func (h *Handlers) GetComments(c echo.Context) error {
 	photoID, err := parseIDParam(c, "id")
 	if err != nil || photoID <= 0 {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid photo id"})
 	}
 
-	currentUserID, _ := getUserID(c) // если не авторизован, будет 0
+	currentUserID, _ := getUserID(c)
 
 	comments, err := h.commentRepo.GetCommentsByPhoto(photoID, currentUserID)
 	if err != nil {
@@ -505,7 +550,7 @@ func (h *Handlers) UnlikeComment(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]string{"message": "comment unliked"})
 }
 
-// ReportComment жалуется на комментарий (ВАЖНО: тут userID используется -> ошибки unused не будет)
+// ReportComment жалуется на комментарий
 func (h *Handlers) ReportComment(c echo.Context) error {
 	userID, ok := getUserID(c)
 	if !ok {
@@ -525,7 +570,6 @@ func (h *Handlers) ReportComment(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "reason is required"})
 	}
 
-	// (опционально) проверить что коммент существует — чтобы не плодить мусор
 	if _, err := h.commentRepo.GetCommentByID(commentID); err != nil {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "comment not found"})
 	}
@@ -537,7 +581,7 @@ func (h *Handlers) ReportComment(c echo.Context) error {
 	return c.JSON(http.StatusCreated, map[string]string{"message": "report sent"})
 }
 
-// DeleteComment удаляет комментарий (автор или админ) (ВАЖНО: userID используется -> ошибки unused не будет)
+// DeleteComment удаляет комментарий (автор или админ)
 func (h *Handlers) DeleteComment(c echo.Context) error {
 	userID, ok := getUserID(c)
 	if !ok {
@@ -570,8 +614,9 @@ func (h *Handlers) DeleteComment(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]string{"message": "comment deleted"})
 }
 
-// ---------- admin  ----------
+// ---------- admin ----------
 
+// GetPendingPhotos получает фото на модерацию
 func (h *Handlers) GetPendingPhotos(c echo.Context) error {
 	userID, ok := getUserID(c)
 	if !ok {
@@ -608,6 +653,7 @@ func (h *Handlers) GetPendingPhotos(c echo.Context) error {
 	return c.JSON(http.StatusOK, photos)
 }
 
+// ApprovePhoto одобряет фото
 func (h *Handlers) ApprovePhoto(c echo.Context) error {
 	userID, ok := getUserID(c)
 	if !ok {
@@ -630,6 +676,7 @@ func (h *Handlers) ApprovePhoto(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]string{"message": "photo approved"})
 }
 
+// RejectPhoto отклоняет фото
 func (h *Handlers) RejectPhoto(c echo.Context) error {
 	userID, ok := getUserID(c)
 	if !ok {
@@ -658,6 +705,7 @@ func (h *Handlers) RejectPhoto(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]string{"message": "photo rejected"})
 }
 
+// GetCommentReports получает жалобы на комментарии
 func (h *Handlers) GetCommentReports(c echo.Context) error {
 	userID, ok := getUserID(c)
 	if !ok {
@@ -684,6 +732,7 @@ func (h *Handlers) GetCommentReports(c echo.Context) error {
 	return c.JSON(http.StatusOK, reports)
 }
 
+// ResolveCommentReport разрешает жалобу на комментарий
 func (h *Handlers) ResolveCommentReport(c echo.Context) error {
 	userID, ok := getUserID(c)
 	if !ok {
@@ -704,7 +753,7 @@ func (h *Handlers) ResolveCommentReport(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
 	}
 
-	action := req["action"] // "delete" или "dismiss"
+	action := req["action"]
 	adminNote := req["admin_note"]
 
 	if action == "" {

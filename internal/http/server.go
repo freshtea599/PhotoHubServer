@@ -27,7 +27,7 @@ func NewServer(cfg *config.Config, db *sql.DB) *Server {
 	commentRepo := repository.NewCommentRepository(db)
 
 	// Handlers
-	h := NewHandlers(jwtManager, userRepo, photoRepo, commentRepo)
+	h := NewHandlers(cfg, jwtManager, userRepo, photoRepo, commentRepo)
 
 	// Middlewares
 	e.Use(CORSMiddleware)

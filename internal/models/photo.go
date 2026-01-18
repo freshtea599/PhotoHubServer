@@ -61,3 +61,47 @@ type PhotoStatus struct {
 type ReportCommentRequest struct {
 	Reason string `json:"reason"`
 }
+type PhotoVariant struct {
+	ID        int64     `json:"id"`
+	PhotoID   int64     `json:"photo_id"`
+	SizeName  string    `json:"size_name"` // thumb, small, medium, large, fullscreen
+	Format    string    `json:"format"`    // webp, jpeg
+	FilePath  string    `json:"file_path"`
+	FileSize  int64     `json:"file_size"`
+	Width     int       `json:"width"`
+	Height    int       `json:"height"`
+	Quality   int       `json:"quality"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// PhotoWithVariants - Photo с массивом вариантов
+type PhotoWithVariants struct {
+	ID          int64     `json:"id"`
+	UserID      int64     `json:"user_id"`
+	Description string    `json:"description"`
+	IsPublic    bool      `json:"is_public"`
+	LikesCount  int64     `json:"likes_count"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+
+	// Новые поля
+	ImageID      string `json:"image_id"`
+	OriginalSize int64  `json:"original_size"`
+	MimeType     string `json:"mime_type"`
+
+	// Варианты
+	Variants []*PhotoVariant `json:"variants"`
+}
+
+// ImagePipelineConfig - конфигурация pipeline'а
+type ImagePipelineConfig struct {
+	Enabled         bool
+	WebPEnabled     bool
+	Quality         int      // 75–90
+	GenerateSizes   []string // ["thumb", "small", "medium", "large", "fullscreen"]
+	AsyncProcessing bool
+	ThumbSize       int // 300
+	SmallSize       int // 480
+	MediumSize      int // 768
+	LargeSize       int // 1200
+}
