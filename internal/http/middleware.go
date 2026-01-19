@@ -8,7 +8,7 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-// JWTMiddleware проверяет JWT токен
+// проверяет токен
 func JWTMiddleware(jwtManager *auth.JWTManager) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
@@ -19,7 +19,7 @@ func JWTMiddleware(jwtManager *auth.JWTManager) echo.MiddlewareFunc {
 				})
 			}
 
-			// Извлекаем токен из заголовка "Bearer <token>"
+			// Извлекаем токен из заголовка
 			parts := strings.SplitN(authHeader, " ", 2)
 			if len(parts) != 2 || parts[0] != "Bearer" {
 				return c.JSON(http.StatusUnauthorized, map[string]string{
@@ -33,8 +33,6 @@ func JWTMiddleware(jwtManager *auth.JWTManager) echo.MiddlewareFunc {
 					"error": "invalid token: " + err.Error(),
 				})
 			}
-
-			// Сохраняем claims в контексте
 			c.Set("user_id", claims.UserID)
 			c.Set("email", claims.Email)
 
@@ -43,7 +41,7 @@ func JWTMiddleware(jwtManager *auth.JWTManager) echo.MiddlewareFunc {
 	}
 }
 
-// CORSMiddleware добавляет CORS заголовки
+// добавляет CORS заголовки
 func CORSMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		c.Response().Header().Set("Access-Control-Allow-Origin", "*")

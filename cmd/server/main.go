@@ -23,7 +23,7 @@ func main() {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
-	// Подключение к PostgreSQL
+	// Подключение к PSQL
 	dbURL := fmt.Sprintf(
 		"host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
 		cfg.DBHost, cfg.DBPort, cfg.DBUser, cfg.DBPassword, cfg.DBName,

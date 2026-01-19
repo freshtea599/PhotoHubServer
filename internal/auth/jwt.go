@@ -21,7 +21,7 @@ func NewJWTManager(secret string) *JWTManager {
 	return &JWTManager{secret: secret}
 }
 
-// GenerateToken создаёт JWT токен
+// создаёт JWT токен
 func (jm *JWTManager) GenerateToken(userID int64, email string) (string, error) {
 	claims := CustomClaims{
 		UserID: userID,
@@ -36,7 +36,7 @@ func (jm *JWTManager) GenerateToken(userID int64, email string) (string, error) 
 	return token.SignedString([]byte(jm.secret))
 }
 
-// ValidateToken проверяет JWT токен
+// проверяет JWT токен
 func (jm *JWTManager) ValidateToken(tokenString string) (*CustomClaims, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &CustomClaims{}, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {

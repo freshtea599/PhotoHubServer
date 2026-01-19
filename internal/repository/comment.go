@@ -15,42 +15,66 @@ func NewCommentRepository(db *sql.DB) *CommentRepository {
 	return &CommentRepository{db: db}
 }
 
-// CreateComment создаёт комментарий
+// создаёт комментарий и возвращает его с username
 func (r *CommentRepository) CreateComment(photoID, userID int64, text string) (*models.Comment, error) {
 	var comment models.Comment
 	var username string
+	// Сначала вставляем комментарий
+	insertErr := r.db.QueryRow(`
+		INSERT INTO comments (photo_id, user_id, text, likes_count, created_at, updated_at)
+		VALUES ($1, $2, $3, 0, NOW(), NOW())
+		RETURNING id, photo_id, user_id, text, likes_count, created_at, updated_at
+	`, photoID, userID, text).Scan(
+		&comment.ID,
+		&comment.PhotoID,
+		&comment.UserID,
+		&comment.Text,
+		&comment.LikesCount,
+		&comment.CreatedAt,
+		&comment.UpdatedAt,
+	)
 
-	err := r.db.QueryRow(
-		`INSERT INTO comments (photo_id, user_id, text, created_at, updated_at)
-		 VALUES ($1, $2, $3, NOW(), NOW())
-		 RETURNING id, photo_id, user_id, text, likes_count, created_at`,
-		photoID, userID, text,
-	).Scan(&comment.ID, &comment.PhotoID, &comment.UserID, &comment.Text, &comment.LikesCount, &comment.CreatedAt)
-
-	if err != nil {
-		return nil, err
+	if insertErr != nil {
+		return nil, insertErr
 	}
 
-	// Получаем юзернейм
-	err = r.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&username)
-	if err == nil {
-		comment.Username = username
+	// Потом получаем username пользователя
+	getErr := r.db.QueryRow(`
+		SELECT username FROM users WHERE id = $1
+	`, userID).Scan(&username)
+
+	if getErr != nil {
+		return nil, getErr
 	}
 
-	comment.UserID = userID
+	comment.Username = username
+	comment.UserLiked = false
 	return &comment, nil
 }
 
-// GetCommentsByPhoto получает комментарии к фото
+// получает комментарии фото с информацией о пользователе
 func (r *CommentRepository) GetCommentsByPhoto(photoID, currentUserID int64) ([]*models.Comment, error) {
-	rows, err := r.db.Query(
-		`SELECT c.id, c.photo_id, c.user_id, u.username, c.text, c.likes_count, c.created_at
-		 FROM comments c
-		 JOIN users u ON c.user_id = u.id
-		 WHERE c.photo_id = $1
-		 ORDER BY c.created_at DESC`,
-		photoID,
-	)
+	rows, err := r.db.Query(`
+		SELECT 
+			c.id,
+			c.photo_id,
+			c.user_id,
+			c.text,
+			c.likes_count,
+			c.created_at,
+			c.updated_at,
+			u.username,
+			CASE 
+				WHEN cl.id IS NOT NULL THEN true 
+				ELSE false 
+			END as user_liked
+		FROM comments c
+		JOIN users u ON c.user_id = u.id
+		LEFT JOIN comment_likes cl ON cl.comment_id = c.id AND cl.user_id = $2
+		WHERE c.photo_id = $1
+		ORDER BY c.created_at DESC
+	`, photoID, currentUserID)
+
 	if err != nil {
 		return nil, err
 	}
@@ -59,13 +83,26 @@ func (r *CommentRepository) GetCommentsByPhoto(photoID, currentUserID int64) ([]
 	var comments []*models.Comment
 	for rows.Next() {
 		var comment models.Comment
-		if err := rows.Scan(&comment.ID, &comment.PhotoID, &comment.UserID, &comment.Username, &comment.Text, &comment.LikesCount, &comment.CreatedAt); err != nil {
+		var username string
+		var userLiked bool
+
+		err := rows.Scan(
+			&comment.ID,
+			&comment.PhotoID,
+			&comment.UserID,
+			&comment.Text,
+			&comment.LikesCount,
+			&comment.CreatedAt,
+			&comment.UpdatedAt,
+			&username,
+			&userLiked,
+		)
+		if err != nil {
 			return nil, err
 		}
 
-		// Проверяем, лайкнул ли текущий юзер
-		liked, _ := r.IsCommentLikedByUser(comment.ID, currentUserID)
-		comment.UserLiked = liked
+		comment.Username = username
+		comment.UserLiked = userLiked
 
 		comments = append(comments, &comment)
 	}
@@ -73,7 +110,7 @@ func (r *CommentRepository) GetCommentsByPhoto(photoID, currentUserID int64) ([]
 	return comments, rows.Err()
 }
 
-// LikeComment ставит лайк комментарию
+// ставит лайк комментарию
 func (r *CommentRepository) LikeComment(commentID, userID int64) error {
 	_, err := r.db.Exec(
 		`INSERT INTO comment_likes (comment_id, user_id, created_at) VALUES ($1, $2, NOW())
@@ -92,7 +129,7 @@ func (r *CommentRepository) LikeComment(commentID, userID int64) error {
 	return err
 }
 
-// UnlikeComment удаляет лайк комментария
+// удаляет лайк комментария
 func (r *CommentRepository) UnlikeComment(commentID, userID int64) error {
 	_, err := r.db.Exec(
 		`DELETE FROM comment_likes WHERE comment_id = $1 AND user_id = $2`,
@@ -110,7 +147,7 @@ func (r *CommentRepository) UnlikeComment(commentID, userID int64) error {
 	return err
 }
 
-// IsCommentLikedByUser проверяет, лайкнул ли юзер комментарий
+// проверяет, лайкнул ли юзер комментарий
 func (r *CommentRepository) IsCommentLikedByUser(commentID, userID int64) (bool, error) {
 	var count int
 	err := r.db.QueryRow(
@@ -120,7 +157,7 @@ func (r *CommentRepository) IsCommentLikedByUser(commentID, userID int64) (bool,
 	return count > 0, err
 }
 
-// DeleteComment удаляет комментарий
+// удаляет комментарий
 func (r *CommentRepository) DeleteComment(commentID int64) error {
 	result, err := r.db.Exec(`DELETE FROM comments WHERE id = $1`, commentID)
 	if err != nil {
@@ -139,7 +176,7 @@ func (r *CommentRepository) DeleteComment(commentID int64) error {
 	return nil
 }
 
-// ReportComment жалуется на комментарий
+// жалуется на комментарий
 func (r *CommentRepository) ReportComment(commentID, reportedBy int64, reason string) error {
 	_, err := r.db.Exec(
 		`INSERT INTO comment_reports (comment_id, reported_by, reason, status, created_at, updated_at)
@@ -149,7 +186,7 @@ func (r *CommentRepository) ReportComment(commentID, reportedBy int64, reason st
 	return err
 }
 
-// GetCommentReports получает жалобы (для админа)
+// получает жалобы (для админа)
 func (r *CommentRepository) GetCommentReports(status string) ([]*models.CommentReport, error) {
 	rows, err := r.db.Query(
 		`SELECT cr.id,
@@ -203,7 +240,7 @@ func (r *CommentRepository) GetCommentReports(status string) ([]*models.CommentR
 	return reports, rows.Err()
 }
 
-// GetCommentByID получает комментарий по ID
+// получает комментарий по ID
 func (r *CommentRepository) GetCommentByID(id int64) (*models.Comment, error) {
 	var comment models.Comment
 	var username string
@@ -227,7 +264,7 @@ func (r *CommentRepository) GetCommentByID(id int64) (*models.Comment, error) {
 	return &comment, nil
 }
 
-// ResolveReport разрешает жалобу (админ)
+// разрешает жалобу (админ)
 func (r *CommentRepository) ResolveReport(reportID int64, action string, adminNote string) error {
 	var commentID int64
 	err := r.db.QueryRow(

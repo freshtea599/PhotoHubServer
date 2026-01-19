@@ -2,13 +2,16 @@ package http
 
 import (
 	"database/sql"
+	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
+	"github.com/disintegration/imaging"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
@@ -69,11 +72,63 @@ func isAdminUser(u *models.User) bool {
 	return u.IsAdmin
 }
 
-// processImageVariants заглушка для обработки изображений
-// TODO: реализовать ресайз + конвертацию в webp позже
+// Обработка изображений с ресайзом и сжатием
 func (h *Handlers) processImageVariants(photoID int64, originalPath string, ext string) error {
-	// Пока ничего не делаем, но функция уже существует
-	// Это позволяет включать/выключать флаг без ошибок компиляции
+	//  Открываем оригинальное изображение
+	srcImage, err := imaging.Open(originalPath)
+	if err != nil {
+		log.Printf("Failed to open image for processing: %v", err)
+		return fmt.Errorf("failed to open image: %w", err)
+	}
+
+	//  Определяем размеры для создания вариантов
+	sizes := map[string]int{
+		"small": h.cfg.ImageSmallSize, // 480px
+		"large": h.cfg.ImageLargeSize, // 1200px
+	}
+
+	// Создаём папку для вариантов если её нет
+	variantsDir := filepath.Join("uploads", "variants", "jpeg")
+	if err := os.MkdirAll(variantsDir, 0755); err != nil {
+		log.Printf("Failed to create variants directory: %v", err)
+		return err
+	}
+
+	// Для каждого размера создаём вариант
+	for sizeName, width := range sizes {
+		// Ресайзим изображение (сохраняем пропорции: width x 0)
+		resizedImg := imaging.Resize(srcImage, width, 0, imaging.Lanczos)
+
+		// Генерируем имя файла
+		fileName := fmt.Sprintf("%s_%d.jpg", sizeName, photoID)
+		relPath := filepath.Join(variantsDir, fileName)
+
+		// Сохраняем в JPEG с качеством из конфига
+		err := imaging.Save(resizedImg, relPath, imaging.JPEGQuality(h.cfg.ImageQuality))
+		if err != nil {
+			log.Printf("Failed to save variant %s: %v", sizeName, err)
+			continue
+		}
+
+		log.Printf("✅ Created variant: %s (size: %dx%d)", sizeName, width, resizedImg.Bounds().Dy())
+
+		// 4. Сохраняем информацию о варианте в БД
+		variant := &models.PhotoVariant{
+			PhotoID:  photoID,
+			SizeName: sizeName,
+			Format:   "jpeg",
+			FilePath: filepath.Join("jpeg", fileName), // относительный путь для БД
+			Width:    width,
+			Height:   resizedImg.Bounds().Dy(),
+		}
+
+		if err := h.photoRepo.CreateVariant(variant); err != nil {
+			log.Printf("Failed to save variant to DB: %v", err)
+			// Не прерываем процесс, если запись в БД не сработала
+		}
+	}
+
+	log.Printf("✅ Image processing completed for photo %d", photoID)
 	return nil
 }
 
@@ -149,7 +204,6 @@ func (h *Handlers) GetMe(c echo.Context) error {
 }
 
 // ---------- photos ----------
-
 // UploadPhoto загружает новое фото с поддержкой фиче-флагов
 func (h *Handlers) UploadPhoto(c echo.Context) error {
 	userID, ok := getUserID(c)
@@ -203,7 +257,7 @@ func (h *Handlers) UploadPhoto(c echo.Context) error {
 		}
 	}
 
-	// 1) Сохраняем оригинал
+	// Сохраняем оригинал
 	baseName := uuid.New().String()
 	originalRelPath := filepath.Join("uploads", "originals", baseName+ext)
 	originalAbsPath := originalRelPath
@@ -222,7 +276,7 @@ func (h *Handlers) UploadPhoto(c echo.Context) error {
 	description := c.FormValue("description")
 	isPublic := c.FormValue("is_public") == "true" || c.FormValue("ispublic") == "true"
 
-	// 2) Пишем в БД
+	// Пишем в БД
 	photo := &models.Photo{
 		UserID:      userID,
 		URL:         "/" + filepath.ToSlash(originalRelPath),
@@ -239,7 +293,7 @@ func (h *Handlers) UploadPhoto(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to save photo to database"})
 	}
 
-	// 3) Опционально запускаем оптимизацию (фиче-флаги)
+	//  Запускаем оптимизацию (фиче-флаги из конфига)
 	if h.cfg.ImagePipelineOn {
 		if h.cfg.AsyncProcessing {
 			// Асинхронно (не блокируем ответ)
@@ -247,10 +301,9 @@ func (h *Handlers) UploadPhoto(c echo.Context) error {
 				_ = h.processImageVariants(photoID, path, ext)
 			}(savedPhoto.ID, originalAbsPath, ext)
 		} else {
-			// Синхронно (для тестов/бенчмарков)
+			// Синхронно (для тестов)
 			if err := h.processImageVariants(savedPhoto.ID, originalAbsPath, ext); err != nil {
-				// Логируем но не валим загрузку
-				// log.Printf("image pipeline failed: %v", err)
+				log.Printf("image pipeline failed: %v", err)
 			}
 		}
 	}
@@ -352,7 +405,7 @@ func (h *Handlers) UpdatePhoto(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
 	}
 
-	updatedPhoto, err := h.photoRepo.Update(id, &req)
+	updatedPhoto, err := h.photoRepo.Update(id, req)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update photo"})
 	}
@@ -463,8 +516,7 @@ func (h *Handlers) IsPhotoLiked(c echo.Context) error {
 }
 
 // ---------- comments ----------
-
-// GetComments получает комментарии фото
+// получает комментарии фото
 func (h *Handlers) GetComments(c echo.Context) error {
 	photoID, err := parseIDParam(c, "id")
 	if err != nil || photoID <= 0 {
@@ -484,7 +536,7 @@ func (h *Handlers) GetComments(c echo.Context) error {
 	return c.JSON(http.StatusOK, comments)
 }
 
-// CreateComment создаёт комментарий
+// создаёт комментарий
 func (h *Handlers) CreateComment(c echo.Context) error {
 	userID, ok := getUserID(c)
 	if !ok {
@@ -512,7 +564,7 @@ func (h *Handlers) CreateComment(c echo.Context) error {
 	return c.JSON(http.StatusCreated, comment)
 }
 
-// LikeComment ставит лайк комментарию
+// ставит лайк комментарию
 func (h *Handlers) LikeComment(c echo.Context) error {
 	userID, ok := getUserID(c)
 	if !ok {
@@ -531,7 +583,7 @@ func (h *Handlers) LikeComment(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]string{"message": "comment liked"})
 }
 
-// UnlikeComment удаляет лайк комментария
+// удаляет лайк комментария
 func (h *Handlers) UnlikeComment(c echo.Context) error {
 	userID, ok := getUserID(c)
 	if !ok {
@@ -550,7 +602,7 @@ func (h *Handlers) UnlikeComment(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]string{"message": "comment unliked"})
 }
 
-// ReportComment жалуется на комментарий
+// жалуется на комментарий
 func (h *Handlers) ReportComment(c echo.Context) error {
 	userID, ok := getUserID(c)
 	if !ok {
@@ -581,7 +633,7 @@ func (h *Handlers) ReportComment(c echo.Context) error {
 	return c.JSON(http.StatusCreated, map[string]string{"message": "report sent"})
 }
 
-// DeleteComment удаляет комментарий (автор или админ)
+// удаляет комментарий
 func (h *Handlers) DeleteComment(c echo.Context) error {
 	userID, ok := getUserID(c)
 	if !ok {
@@ -616,7 +668,7 @@ func (h *Handlers) DeleteComment(c echo.Context) error {
 
 // ---------- admin ----------
 
-// GetPendingPhotos получает фото на модерацию
+// получает фото на модерацию
 func (h *Handlers) GetPendingPhotos(c echo.Context) error {
 	userID, ok := getUserID(c)
 	if !ok {
@@ -653,7 +705,7 @@ func (h *Handlers) GetPendingPhotos(c echo.Context) error {
 	return c.JSON(http.StatusOK, photos)
 }
 
-// ApprovePhoto одобряет фото
+// одобряет фото
 func (h *Handlers) ApprovePhoto(c echo.Context) error {
 	userID, ok := getUserID(c)
 	if !ok {
@@ -676,7 +728,7 @@ func (h *Handlers) ApprovePhoto(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]string{"message": "photo approved"})
 }
 
-// RejectPhoto отклоняет фото
+// отклоняет фото
 func (h *Handlers) RejectPhoto(c echo.Context) error {
 	userID, ok := getUserID(c)
 	if !ok {
@@ -705,7 +757,7 @@ func (h *Handlers) RejectPhoto(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]string{"message": "photo rejected"})
 }
 
-// GetCommentReports получает жалобы на комментарии
+// получает жалобы на комментарии
 func (h *Handlers) GetCommentReports(c echo.Context) error {
 	userID, ok := getUserID(c)
 	if !ok {
@@ -732,7 +784,7 @@ func (h *Handlers) GetCommentReports(c echo.Context) error {
 	return c.JSON(http.StatusOK, reports)
 }
 
-// ResolveCommentReport разрешает жалобу на комментарий
+// разрешает жалобу на комментарий
 func (h *Handlers) ResolveCommentReport(c echo.Context) error {
 	userID, ok := getUserID(c)
 	if !ok {

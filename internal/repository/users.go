@@ -16,19 +16,19 @@ func NewUserRepository(db *sql.DB) *UserRepository {
 	return &UserRepository{db: db}
 }
 
-// HashPassword хеширует пароль
+// хеширует пароль
 func hashPassword(password string) (string, error) {
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	return string(hash), err
 }
 
-// CheckPassword проверяет пароль
+// проверяет пароль
 func checkPassword(hash, password string) bool {
 	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 	return err == nil
 }
 
-// Create создаёт нового пользователя
+// создаёт нового пользователя
 func (r *UserRepository) Create(email, password, username string) (*models.User, error) {
 	hashedPassword, err := hashPassword(password)
 	if err != nil {
@@ -50,7 +50,7 @@ func (r *UserRepository) Create(email, password, username string) (*models.User,
 	return &user, nil
 }
 
-// GetByEmail получает пользователя по email
+// получает пользователя по email
 func (r *UserRepository) GetByEmail(email string) (*models.User, string, error) {
 	var user models.User
 	var passwordHash string
@@ -71,7 +71,7 @@ func (r *UserRepository) GetByEmail(email string) (*models.User, string, error) 
 	return &user, passwordHash, nil
 }
 
-// GetByID получает пользователя по ID
+// получает пользователя по ID
 func (r *UserRepository) GetByID(id int64) (*models.User, error) {
 	var user models.User
 	err := r.db.QueryRow(
@@ -89,7 +89,7 @@ func (r *UserRepository) GetByID(id int64) (*models.User, error) {
 	return &user, nil
 }
 
-// CheckPassword проверяет пароль пользователя
+// проверяет пароль пользователя
 func (r *UserRepository) CheckPassword(email, password string) (*models.User, error) {
 	user, hash, err := r.GetByEmail(email)
 	if err != nil {

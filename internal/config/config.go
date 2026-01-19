@@ -17,20 +17,16 @@ type Config struct {
 	DBPassword string
 	DBName     string
 	JWTSecret  string
-	// Image optimization
-	ImageThumbSize  int `mapstructure:"IMAGE_THUMB_SIZE" default:"300"`
-	ImageSmallSize  int `mapstructure:"IMAGE_SMALL_SIZE" default:"480"`
-	ImageMediumSize int `mapstructure:"IMAGE_MEDIUM_SIZE" default:"768"`
-	ImageLargeSize  int `mapstructure:"IMAGE_LARGE_SIZE" default:"1200"`
 
-	// Pipeline flags
-	ImagePipelineOn bool `mapstructure:"IMAGE_PIPELINE_ON" default:"true"`
-	WebPEnabled     bool `mapstructure:"IMAGE_WEBP_ENABLED" default:"true"`
-	ImageQuality    int  `mapstructure:"IMAGE_QUALITY" default:"80"`
-	AsyncProcessing bool `mapstructure:"IMAGE_ASYNC_PROCESSING" default:"true"`
-
-	// Library choice
-	ImageLibrary string `mapstructure:"IMAGE_LIBRARY" default:"bimg"` // bimg или golang-image
+	ImageThumbSize  int    `mapstructure:"IMAGE_THUMB_SIZE" default:"300"`
+	ImageSmallSize  int    `mapstructure:"IMAGE_SMALL_SIZE" default:"480"`
+	ImageMediumSize int    `mapstructure:"IMAGE_MEDIUM_SIZE" default:"768"`
+	ImageLargeSize  int    `mapstructure:"IMAGE_LARGE_SIZE" default:"1200"`
+	ImagePipelineOn bool   `mapstructure:"IMAGE_PIPELINE_ON" default:"true"`
+	WebPEnabled     bool   `mapstructure:"IMAGE_WEBP_ENABLED" default:"true"`
+	ImageQuality    int    `mapstructure:"IMAGE_QUALITY" default:"80"`
+	AsyncProcessing bool   `mapstructure:"IMAGE_ASYNC_PROCESSING" default:"true"`
+	ImageLibrary    string `mapstructure:"IMAGE_LIBRARY" default:"bimg"`
 }
 
 func Load() (*Config, error) {
@@ -56,19 +52,16 @@ func Load() (*Config, error) {
 		DBName:     getEnv("DB_NAME", "photohub"),
 		JWTSecret:  getEnv("JWT_SECRET", "your-secret-key-change-in-production"),
 
-		// Image optimization
 		ImageThumbSize:  getEnvInt("IMAGE_THUMB_SIZE", 300),
 		ImageSmallSize:  getEnvInt("IMAGE_SMALL_SIZE", 480),
 		ImageMediumSize: getEnvInt("IMAGE_MEDIUM_SIZE", 768),
 		ImageLargeSize:  getEnvInt("IMAGE_LARGE_SIZE", 1200),
 
-		// Pipeline flags
 		ImagePipelineOn: getEnvBool("IMAGE_PIPELINE_ON", false),
 		WebPEnabled:     getEnvBool("IMAGE_WEBP_ENABLED", true),
 		ImageQuality:    getEnvInt("IMAGE_QUALITY", 80),
 		AsyncProcessing: getEnvBool("IMAGE_ASYNC_PROCESSING", false),
 
-		// Library choice
 		ImageLibrary: getEnv("IMAGE_LIBRARY", "bimg"),
 	}, nil
 }
