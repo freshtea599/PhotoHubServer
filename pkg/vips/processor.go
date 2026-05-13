@@ -1,9 +1,14 @@
+// backend/pkg/vips/processor.go
 package vips
 
 import (
+	"bytes"
 	"fmt"
+	"image"
+	_ "image/jpeg" // для поддержки JPEG
+	_ "image/png"  // для поддержки PNG
 
-	"github.com/h2non/bimg"
+	"github.com/disintegration/imaging"
 )
 
 type Processor struct{}
@@ -12,36 +17,26 @@ func NewProcessor() (*Processor, error) {
 	return &Processor{}, nil
 }
 
-// Transform выполняет ресайз и конвертацию в WebP/AVIF/JPEG.
 func (p *Processor) Transform(data []byte, width int, format string, quality int) ([]byte, error) {
-	img := bimg.NewImage(data)
-	if img == nil {
-		return nil, fmt.Errorf("bimg: nil image")
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
 	}
 
-	// Ресайз, если указана ширина
 	if width > 0 {
-		origSize, err := img.Size()
-		if err != nil {
-			return nil, fmt.Errorf("bimg size: %w", err)
-		}
-		height := int(float64(width) * float64(origSize.Height) / float64(origSize.Width))
-		resized, err := img.Resize(width, height)
-		if err != nil {
-			return nil, fmt.Errorf("bimg resize: %w", err)
-		}
-		img = bimg.NewImage(resized)
+		img = imaging.Resize(img, width, 0, imaging.Lanczos)
 	}
 
-	// Выбор формата и сжатия
+	var buf bytes.Buffer
 	switch format {
 	case "webp":
-		return img.Convert(bimg.WEBP)
-	case "avif":
-		opts := bimg.Options{Type: bimg.AVIF, Quality: quality}
-		return img.Process(opts)
-	default: // jpeg
-		opts := bimg.Options{Type: bimg.JPEG, Quality: quality}
-		return img.Process(opts)
+		// imaging не поддерживает WebP, поэтому отдаём JPEG с тем же качеством
+		fallthrough
+	default:
+		err = imaging.Encode(&buf, img, imaging.JPEG, imaging.JPEGQuality(quality))
 	}
+	if err != nil {
+		return nil, fmt.Errorf("encode: %w", err)
+	}
+	return buf.Bytes(), nil
 }

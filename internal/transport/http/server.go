@@ -49,6 +49,7 @@ func NewServer(
 	api := e.Group("/api")
 	api.Use(JWTMiddleware(jwtManager))
 	api.POST("/upload", h.UploadPhoto) // POST /api/upload
+	api.GET("/photos/mine", h.GetMyPhotos)
 
 	// Статическая раздача оригиналов (если нужно, через Echo)
 	// В проде это делает Nginx, но для отладки оставим

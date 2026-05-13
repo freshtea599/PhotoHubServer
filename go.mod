@@ -3,9 +3,9 @@ module github.com/freshtea599/PhotoHubServer.git
 go 1.25.1
 
 require (
+	github.com/disintegration/imaging v1.6.2
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/google/uuid v1.6.0
-	github.com/h2non/bimg v1.1.9
 	github.com/joho/godotenv v1.5.1
 	github.com/labstack/echo/v4 v4.15.0
 	github.com/lib/pq v1.10.9
@@ -38,6 +38,7 @@ require (
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasttemplate v1.2.2 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
+	golang.org/x/image v0.0.0-20191009234506-e7c1f5e7dbb8 // indirect
 	golang.org/x/net v0.49.0 // indirect
 	golang.org/x/sys v0.44.0 // indirect
 	golang.org/x/text v0.37.0 // indirect

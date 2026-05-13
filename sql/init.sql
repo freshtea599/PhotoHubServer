@@ -27,12 +27,12 @@ CREATE TABLE public.photos (
     mime_type character varying(50),
     description text,
     is_public boolean DEFAULT false,
-    likes_count integer DEFAULT 0,
+    blurhash text,
+    content_hash text,
+    width integer,
+    height integer,
     created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
-    updated_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
-    image_id uuid,
-    original_filename character varying(255),
-    original_size bigint
+    updated_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE SEQUENCE public.photos_id_seq AS integer START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1;
