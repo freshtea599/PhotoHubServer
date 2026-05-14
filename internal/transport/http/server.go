@@ -32,28 +32,40 @@ func NewServer(
 	imgProc *usecase.ImageProcessor,
 ) *Server {
 	e := echo.New()
-
-	// CORS middleware (как раньше)
 	e.Use(CORSMiddleware)
-
-	// Инициализация обработчиков
 	h := NewHandlers(cfg, jwtManager, userRepo, photoRepo, minioRepo, imgProc)
 
-	// Публичные маршруты
+	// Публичные
 	e.POST("/api/register", h.Register)
 	e.POST("/api/login", h.Login)
 	e.GET("/api/photos", h.ListPhotos)
 	e.GET("/api/photos/:id/variant", h.GetImageVariant)
 
-	// Защищённые маршруты (JWT)
+	// Защищённые
 	api := e.Group("/api")
 	api.Use(JWTMiddleware(jwtManager))
-	api.POST("/upload", h.UploadPhoto) // POST /api/upload
+	api.GET("/auth/me", h.GetMe)
+	api.POST("/upload", h.UploadPhoto)
 	api.GET("/photos/mine", h.GetMyPhotos)
+	api.PUT("/photos/:id", h.UpdatePhoto)
+	api.DELETE("/photos/:id", h.DeletePhoto)
+	api.POST("/photos/:id/like", h.LikePhoto)
+	api.DELETE("/photos/:id/like", h.UnlikePhoto)
+	api.GET("/photos/:id/like", h.IsPhotoLiked)
+	api.GET("/photos/:id/comments", h.GetComments)
+	api.POST("/photos/:id/comments", h.CreateComment)
+	api.POST("/comments/:id/like", h.LikeComment)
+	api.DELETE("/comments/:id/like", h.UnlikeComment)
+	api.POST("/comments/:id/report", h.ReportComment)
 
-	// Статическая раздача оригиналов (если нужно, через Echo)
-	// В проде это делает Nginx, но для отладки оставим
-	e.Static("/media", "uploads") // локальная папка (можно заменить на MinIO-прокси, но пока так)
+	// Админские (проверку is_admin добавить позже)
+	admin := e.Group("/admin")
+	admin.Use(JWTMiddleware(jwtManager))
+	admin.GET("/photos/pending", h.GetPendingPhotos)
+	admin.POST("/photos/:id/approve", h.ApprovePhoto)
+	admin.POST("/photos/:id/reject", h.RejectPhoto)
+
+	e.Static("/media", "uploads")
 
 	return &Server{
 		echo:           e,

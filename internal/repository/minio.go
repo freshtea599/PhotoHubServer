@@ -68,3 +68,22 @@ func (r *MinioRepo) GetVariant(ctx context.Context, key string) (io.ReadCloser, 
 func (r *MinioRepo) DeleteOriginal(ctx context.Context, key string) error {
 	return r.client.RemoveObject(ctx, r.bucketOriginals, key, minio.RemoveObjectOptions{})
 }
+
+func (r *MinioRepo) DeleteVariants(ctx context.Context, photoID int64) error {
+	objectsCh := make(chan minio.ObjectInfo)
+	go func() {
+		defer close(objectsCh)
+		for obj := range r.client.ListObjects(ctx, r.bucketVariants, minio.ListObjectsOptions{
+			Prefix:    fmt.Sprintf("%d/", photoID),
+			Recursive: true,
+		}) {
+			objectsCh <- obj
+		}
+	}()
+	for err := range r.client.RemoveObjects(ctx, r.bucketVariants, objectsCh, minio.RemoveObjectsOptions{}) {
+		if err.Err != nil {
+			return err.Err
+		}
+	}
+	return nil
+}

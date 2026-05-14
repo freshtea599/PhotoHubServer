@@ -111,6 +111,25 @@ func (ip *ImageProcessor) GetVariant(
 	// 6. Сохраняем результат в MinIO
 	variantKey := fmt.Sprintf("%d/%s/%s/%s", photoID, sizeName, format, job.ID.String())
 	err = ip.minioRepo.PutVariant(ctx, variantKey, bytes.NewReader(result.Data), int64(len(result.Data)), mimeTypeForFormat(format))
+	// После строки err = ip.minioRepo.PutVariant(...)
+	if err == nil {
+		// Сохраняем запись в БД
+		variant := &domain.PhotoVariant{
+			PhotoID:  photoID,
+			SizeName: sizeName,
+			Format:   format,
+			FilePath: variantKey,
+			Width:    width,
+			Quality:  quality,
+		}
+		if dbErr := ip.photoRepo.CreateVariant(variant); dbErr != nil {
+			log.Printf("DB variant save error: %v", dbErr)
+		}
+		// Кэшируем ключ в Redis
+		if cacheErr := ip.redisRepo.CacheVariantKey(ctx, photoID, sizeName, format, variantKey); cacheErr != nil {
+			log.Printf("Redis cache error: %v", cacheErr)
+		}
+	}
 	if err != nil {
 		log.Printf("failed to save variant to MinIO: %v", err)
 	} else {

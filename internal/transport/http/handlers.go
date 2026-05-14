@@ -1,4 +1,3 @@
-// backend/internal/transport/http/handlers.go
 package http
 
 import (
@@ -6,12 +5,17 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"log"
 	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/buckket/go-blurhash"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -23,17 +27,15 @@ import (
 	"github.com/freshtea599/PhotoHubServer.git/internal/usecase"
 )
 
-// Handlers содержит все обработчики HTTP.
 type Handlers struct {
 	cfg            *config.Config
 	jwtManager     *auth.JWTManager
 	userRepo       *repository.PostgresUserRepo
 	photoRepo      *repository.PostgresPhotoRepo
 	minioRepo      *repository.MinioRepo
-	imageProcessor *usecase.ImageProcessor // может быть nil на начальном этапе
+	imageProcessor *usecase.ImageProcessor
 }
 
-// NewHandlers создаёт новый экземпляр обработчиков.
 func NewHandlers(
 	cfg *config.Config,
 	jwtManager *auth.JWTManager,
@@ -52,7 +54,6 @@ func NewHandlers(
 	}
 }
 
-// ---------- helpers ----------
 func getUserID(c echo.Context) (int64, bool) {
 	v := c.Get("user_id")
 	if v == nil {
@@ -62,9 +63,8 @@ func getUserID(c echo.Context) (int64, bool) {
 	return id, ok && id > 0
 }
 
-// ---------- auth (оставлены минимально, если нужна регистрация) ----------
+// ---------- Auth ----------
 func (h *Handlers) Register(c echo.Context) error {
-	// (реализация как раньше, но с новыми типами)
 	var req domain.RegisterRequest
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
@@ -102,48 +102,66 @@ func (h *Handlers) Login(c echo.Context) error {
 	return c.JSON(http.StatusOK, domain.AuthResponse{Token: token, User: user})
 }
 
-// ---------- photos ----------
+func (h *Handlers) GetMe(c echo.Context) error {
+	userID, ok := getUserID(c)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	}
+	user, err := h.userRepo.GetByID(userID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+	}
+	return c.JSON(http.StatusOK, user)
+}
 
-// UploadPhoto загружает новый файл в MinIO и сохраняет метаданные.
+// ---------- Photos ----------
 func (h *Handlers) UploadPhoto(c echo.Context) error {
 	userID, ok := getUserID(c)
 	if !ok {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 	}
-
 	file, err := c.FormFile("photo")
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "photo file is required"})
 	}
-
-	// Ограничение размера (50 МБ)
 	if file.Size > 50*1024*1024 {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "photo size must not exceed 50MB"})
 	}
-
-	allowedTypes := map[string]bool{
-		"image/jpeg": true,
-		"image/png":  true,
-		"image/webp": true,
-	}
+	allowedTypes := map[string]bool{"image/jpeg": true, "image/png": true, "image/webp": true}
 	mimeType := file.Header.Get("Content-Type")
 	if !allowedTypes[mimeType] {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid image format. allowed: jpeg, png, webp"})
 	}
-
 	src, err := file.Open()
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to open file"})
 	}
 	defer src.Close()
-
-	// Читаем содержимое для вычисления хэша и загрузки в MinIO
 	fileBytes, err := io.ReadAll(src)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to read file"})
 	}
 
-	// Генерируем уникальное имя (UUID + расширение)
+	// --- ВЫЧИСЛЕНИЕ РАЗМЕРОВ И BLURHASH ---
+	img, _, err := image.Decode(bytes.NewReader(fileBytes))
+	if err != nil {
+		// Если decode не удался, продолжаем без BlurHash
+		fmt.Printf("Warning: failed to decode image for blurhash: %v\n", err)
+	}
+	var width, height int
+	var blurHashStr string
+	if img != nil {
+		bounds := img.Bounds()
+		width, height = bounds.Dx(), bounds.Dy()
+		// xComponents=4, yComponents=3 – хороший баланс качество/скорость
+		blurHashStr, err = blurhash.Encode(4, 3, img)
+		if err != nil {
+			fmt.Printf("Warning: blurhash encode error: %v\n", err)
+			blurHashStr = ""
+		}
+	}
+	// -----------------------------------------
+
 	ext := strings.ToLower(filepath.Ext(file.Filename))
 	if ext == "" {
 		switch mimeType {
@@ -156,21 +174,12 @@ func (h *Handlers) UploadPhoto(c echo.Context) error {
 		}
 	}
 	objectKey := uuid.New().String() + ext
-
-	// Загрузка в MinIO (бакет originals)
-	err = h.minioRepo.PutOriginal(c.Request().Context(), objectKey, bytesReader(fileBytes), file.Size, mimeType)
+	err = h.minioRepo.PutOriginal(c.Request().Context(), objectKey, bytes.NewReader(fileBytes), file.Size, mimeType)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to store file"})
 	}
-
-	// Вычисляем Content Hash (SHA-256)
 	hash := fmt.Sprintf("%x", sha256.Sum256(fileBytes))
 
-	// TODO: вычислить BlurHash и размеры (пока заглушка)
-	blurHash := "L6PZfSi_.AyE_3t7t7R**0o#DgR4" // пример, позже заменим
-	width, height := 0, 0                      // позже получим реальные
-
-	// Сохраняем метаданные в БД
 	photo := &domain.Photo{
 		UserID:      userID,
 		URL:         "/media/originals/" + objectKey,
@@ -179,23 +188,19 @@ func (h *Handlers) UploadPhoto(c echo.Context) error {
 		MimeType:    mimeType,
 		Description: c.FormValue("description"),
 		IsPublic:    c.FormValue("is_public") == "true",
-		BlurHash:    blurHash,
+		BlurHash:    blurHashStr,
 		ContentHash: hash,
 		Width:       width,
 		Height:      height,
 	}
-
 	savedPhoto, err := h.photoRepo.Create(photo)
 	if err != nil {
-		// если не удалось сохранить в БД, удаляем из MinIO
 		_ = h.minioRepo.DeleteOriginal(c.Request().Context(), objectKey)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to save metadata"})
 	}
-
 	return c.JSON(http.StatusCreated, savedPhoto)
 }
 
-// ListPhotos возвращает публичные фото с пагинацией.
 func (h *Handlers) ListPhotos(c echo.Context) error {
 	limit := 20
 	offset := 0
@@ -216,63 +221,6 @@ func (h *Handlers) ListPhotos(c echo.Context) error {
 	return c.JSON(http.StatusOK, photos)
 }
 
-// GetImageVariant – JIT-эндпоинт: возвращает оптимизированное изображение.
-func (h *Handlers) GetImageVariant(c echo.Context) error {
-	photoID, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil || photoID <= 0 {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid photo id"})
-	}
-
-	width, _ := strconv.Atoi(c.QueryParam("width"))
-	format := c.QueryParam("format") // "webp", "avif", "jpeg"
-	if format == "" {
-		format = "jpeg"
-	}
-	quality, _ := strconv.Atoi(c.QueryParam("q"))
-	if quality < 1 || quality > 100 {
-		quality = 80
-	}
-
-	// Если ImageProcessor ещё не подключён, возвращаем ошибку (или оригинал)
-	if h.imageProcessor == nil {
-		// Заглушка: отдаём оригинал из MinIO
-		photo, err := h.photoRepo.GetByID(photoID)
-		if err != nil {
-			return c.JSON(http.StatusNotFound, map[string]string{"error": "photo not found"})
-		}
-		reader, err := h.minioRepo.GetOriginal(c.Request().Context(), photo.FilePath)
-		if err != nil {
-			return c.JSON(http.StatusNotFound, map[string]string{"error": "original file not found"})
-		}
-		defer reader.Close()
-		data, _ := io.ReadAll(reader)
-		return c.Blob(http.StatusOK, photo.MimeType, data)
-	}
-
-	// Основной сценарий – JIT-трансформация
-	sizeName := fmt.Sprintf("%dw", width) // например "400w"
-	data, contentType, err := h.imageProcessor.GetVariant(
-		c.Request().Context(),
-		photoID,
-		sizeName,
-		width,
-		format,
-		quality,
-	)
-	if err != nil {
-		log.Printf("JIT variant error: %v", err)
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to generate variant"})
-	}
-
-	return c.Blob(http.StatusOK, contentType, data)
-}
-
-// bytesReader – вспомогательная функция.
-func bytesReader(data []byte) *bytes.Reader {
-	return bytes.NewReader(data)
-}
-
-// GetMyPhotos возвращает фото текущего пользователя
 func (h *Handlers) GetMyPhotos(c echo.Context) error {
 	userID, ok := getUserID(c)
 	if !ok {
@@ -295,4 +243,278 @@ func (h *Handlers) GetMyPhotos(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to fetch photos"})
 	}
 	return c.JSON(http.StatusOK, photos)
+}
+
+func (h *Handlers) UpdatePhoto(c echo.Context) error {
+	userID, ok := getUserID(c)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	}
+	photoID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid photo id"})
+	}
+	var req domain.UpdatePhotoRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
+	}
+	photo, err := h.photoRepo.GetByID(photoID)
+	if err != nil || photo.UserID != userID {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "access denied"})
+	}
+	updated, err := h.photoRepo.Update(photoID, req)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update"})
+	}
+	return c.JSON(http.StatusOK, updated)
+}
+
+func (h *Handlers) DeletePhoto(c echo.Context) error {
+	userID, ok := getUserID(c)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	}
+	photoID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid photo id"})
+	}
+	photo, err := h.photoRepo.GetByID(photoID)
+	if err != nil || photo.UserID != userID {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "access denied"})
+	}
+	// удаляем из MinIO
+	_ = h.minioRepo.DeleteOriginal(c.Request().Context(), photo.FilePath)
+	if err := h.minioRepo.DeleteVariants(c.Request().Context(), photoID); err != nil {
+		log.Printf("Failed to delete variants: %v", err)
+	}
+	// удаляем из БД
+	if err := h.photoRepo.Delete(photoID); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to delete"})
+	}
+	return c.NoContent(http.StatusOK)
+}
+
+// ---------- JIT ----------
+func (h *Handlers) GetImageVariant(c echo.Context) error {
+	photoID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || photoID <= 0 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid photo id"})
+	}
+	width, _ := strconv.Atoi(c.QueryParam("width"))
+	format := c.QueryParam("format")
+	if format == "" {
+		format = "jpeg"
+	}
+	quality, _ := strconv.Atoi(c.QueryParam("q"))
+	if quality < 1 || quality > 100 {
+		quality = 80
+	}
+	if h.imageProcessor == nil {
+		photo, err := h.photoRepo.GetByID(photoID)
+		if err != nil {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "photo not found"})
+		}
+		reader, err := h.minioRepo.GetOriginal(c.Request().Context(), photo.FilePath)
+		if err != nil {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "original file not found"})
+		}
+		defer reader.Close()
+		data, _ := io.ReadAll(reader)
+		return c.Blob(http.StatusOK, photo.MimeType, data)
+	}
+	sizeName := fmt.Sprintf("%dw", width)
+	data, contentType, err := h.imageProcessor.GetVariant(
+		c.Request().Context(),
+		photoID,
+		sizeName,
+		width,
+		format,
+		quality,
+	)
+	if err != nil {
+		log.Printf("JIT variant error: %v", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to generate variant"})
+	}
+	return c.Blob(http.StatusOK, contentType, data)
+}
+
+// ---------- Likes for photos ----------
+func (h *Handlers) LikePhoto(c echo.Context) error {
+	userID, ok := getUserID(c)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	}
+	photoID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid photo id"})
+	}
+	if err := h.photoRepo.LikePhoto(photoID, userID); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to like"})
+	}
+	photo, _ := h.photoRepo.GetByID(photoID)
+	return c.JSON(http.StatusOK, photo)
+}
+
+func (h *Handlers) UnlikePhoto(c echo.Context) error {
+	userID, ok := getUserID(c)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	}
+	photoID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid photo id"})
+	}
+	if err := h.photoRepo.UnlikePhoto(photoID, userID); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to unlike"})
+	}
+	photo, _ := h.photoRepo.GetByID(photoID)
+	return c.JSON(http.StatusOK, photo)
+}
+
+func (h *Handlers) IsPhotoLiked(c echo.Context) error {
+	userID, ok := getUserID(c)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	}
+	photoID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid photo id"})
+	}
+	liked, err := h.photoRepo.IsPhotoLiked(photoID, userID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "db error"})
+	}
+	return c.JSON(http.StatusOK, map[string]bool{"liked": liked})
+}
+
+// ---------- Comments ----------
+func (h *Handlers) GetComments(c echo.Context) error {
+	photoID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid photo id"})
+	}
+	comments, err := h.photoRepo.GetComments(photoID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to fetch comments"})
+	}
+	return c.JSON(http.StatusOK, comments)
+}
+
+func (h *Handlers) CreateComment(c echo.Context) error {
+	userID, ok := getUserID(c)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	}
+	photoID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid photo id"})
+	}
+	var req struct {
+		Text string `json:"text"`
+	}
+	if err := c.Bind(&req); err != nil || req.Text == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "text required"})
+	}
+	commentID, err := h.photoRepo.CreateComment(photoID, userID, req.Text)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to create comment"})
+	}
+	comments, err := h.photoRepo.GetComments(photoID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to fetch comments"})
+	}
+	for _, comm := range comments { // ← переименовано с "c" на "comm"
+		if comm.ID == commentID {
+			return c.JSON(http.StatusCreated, comm)
+		}
+	}
+	return c.JSON(http.StatusInternalServerError, map[string]string{"error": "comment not found"})
+}
+
+// ---------- Comment likes ----------
+func (h *Handlers) LikeComment(c echo.Context) error {
+	userID, ok := getUserID(c)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	}
+	commentID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid comment id"})
+	}
+	if err := h.photoRepo.LikeComment(commentID, userID); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to like comment"})
+	}
+	return c.NoContent(http.StatusOK)
+}
+
+func (h *Handlers) UnlikeComment(c echo.Context) error {
+	userID, ok := getUserID(c)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	}
+	commentID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid comment id"})
+	}
+	if err := h.photoRepo.UnlikeComment(commentID, userID); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to unlike comment"})
+	}
+	return c.NoContent(http.StatusOK)
+}
+
+func (h *Handlers) ReportComment(c echo.Context) error {
+	userID, ok := getUserID(c)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	}
+	commentID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid comment id"})
+	}
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if err := c.Bind(&req); err != nil || req.Reason == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "reason required"})
+	}
+	if err := h.photoRepo.ReportComment(commentID, userID, req.Reason); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to report comment"})
+	}
+	return c.NoContent(http.StatusOK)
+}
+
+// ---------- Admin ----------
+func (h *Handlers) GetPendingPhotos(c echo.Context) error {
+	photos, err := h.photoRepo.GetPendingPhotos()
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to fetch pending photos"})
+	}
+	return c.JSON(http.StatusOK, photos)
+}
+
+func (h *Handlers) ApprovePhoto(c echo.Context) error {
+	photoID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid id"})
+	}
+	if err := h.photoRepo.ApprovePhoto(photoID); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to approve"})
+	}
+	return c.NoContent(http.StatusOK)
+}
+
+func (h *Handlers) RejectPhoto(c echo.Context) error {
+	photoID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid id"})
+	}
+	if err := h.photoRepo.RejectPhoto(photoID); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to reject"})
+	}
+	return c.NoContent(http.StatusOK)
+}
+
+// Helper
+func bytesReader(data []byte) *bytes.Reader {
+	return bytes.NewReader(data)
 }
