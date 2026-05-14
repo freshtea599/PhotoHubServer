@@ -100,6 +100,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to init vips processor: %v", err)
 	}
+	// Отложенный вызов Shutdown для vips (после остановки сервера)
+	defer vipsProcessor.Shutdown()
 
 	// ImageProcessor (WorkerPool внутри)
 	imageProcessor, err := usecase.NewImageProcessor(
