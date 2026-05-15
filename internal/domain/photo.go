@@ -6,14 +6,16 @@ import (
 )
 
 type Photo struct {
-	ID          int64         `json:"id"`
-	UserID      int64         `json:"user_id,omitempty"`
-	URL         string        `json:"url"`
-	FilePath    string        `json:"file_path"`
-	FileSize    sql.NullInt64 `json:"file_size"`
-	MimeType    string        `json:"mime_type"`
-	Description string        `json:"description"`
-	IsPublic    bool          `json:"is_public"`
+	ID            int64         `json:"id"`
+	UserID        int64         `json:"user_id,omitempty"`
+	URL           string        `json:"url"`
+	FilePath      string        `json:"file_path"`
+	FileSize      sql.NullInt64 `json:"file_size"`
+	MimeType      string        `json:"mime_type"`
+	Description   string        `json:"description"`
+	IsPublic      bool          `json:"is_public"`
+	LikesCount    int           `json:"likes_count"`
+	CommentsCount int           `json:"comments_count"`
 	// Новые поля для методики
 	BlurHash    string `json:"blurhash"`
 	ContentHash string `json:"content_hash"`

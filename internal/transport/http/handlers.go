@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/buckket/go-blurhash"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
@@ -118,6 +119,7 @@ func (h *Handlers) UploadPhoto(c echo.Context) error {
 	if !ok {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 	}
+
 	file, err := c.FormFile("photo")
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "photo file is required"})
@@ -130,26 +132,26 @@ func (h *Handlers) UploadPhoto(c echo.Context) error {
 	if !allowedTypes[mimeType] {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid image format. allowed: jpeg, png, webp"})
 	}
+
 	src, err := file.Open()
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to open file"})
 	}
 	defer src.Close()
+
 	fileBytes, err := io.ReadAll(src)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to read file"})
 	}
 
-	// Попытка вычислить размеры и blurhash (если не получится – игнорируем)
+	// Вычисляем ширину, высоту и BlurHash
 	var width, height int
 	var blurHashStr string
 	img, _, decodeErr := image.Decode(bytes.NewReader(fileBytes))
 	if decodeErr == nil {
 		bounds := img.Bounds()
 		width, height = bounds.Dx(), bounds.Dy()
-		// Если пакет blurhash доступен, можно закодировать, но не критично
-		// blurHashStr, _ = blurhash.Encode(4, 3, img)
-		// Пока оставим пустым, чтобы избежать лишних зависимостей
+		blurHashStr, _ = blurhash.Encode(4, 3, img)
 	} else {
 		log.Printf("Warning: failed to decode image for dimensions/blurhash: %v", decodeErr)
 	}
@@ -166,13 +168,14 @@ func (h *Handlers) UploadPhoto(c echo.Context) error {
 		}
 	}
 	objectKey := uuid.New().String() + ext
+
 	err = h.minioRepo.PutOriginal(c.Request().Context(), objectKey, bytes.NewReader(fileBytes), file.Size, mimeType)
 	if err != nil {
 		log.Printf("MinIO put error: %v", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to store file"})
 	}
-	hash := fmt.Sprintf("%x", sha256.Sum256(fileBytes))
 
+	hash := fmt.Sprintf("%x", sha256.Sum256(fileBytes))
 	photo := &domain.Photo{
 		UserID:      userID,
 		URL:         "/media/originals/" + objectKey,
@@ -186,14 +189,17 @@ func (h *Handlers) UploadPhoto(c echo.Context) error {
 		Width:       width,
 		Height:      height,
 	}
+
 	savedPhoto, err := h.photoRepo.Create(photo)
 	if err != nil {
 		_ = h.minioRepo.DeleteOriginal(c.Request().Context(), objectKey)
 		log.Printf("DB create error: %v", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to save metadata"})
 	}
+
 	return c.JSON(http.StatusCreated, savedPhoto)
 }
+
 func (h *Handlers) ListPhotos(c echo.Context) error {
 	limit := 20
 	offset := 0
@@ -293,12 +299,12 @@ func (h *Handlers) GetImageVariant(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid photo id"})
 	}
 
+	// Получаем параметры
 	width, _ := strconv.Atoi(c.QueryParam("width"))
 	quality, _ := strconv.Atoi(c.QueryParam("q"))
 	if quality < 1 || quality > 100 {
 		quality = 80
 	}
-
 	format := c.QueryParam("format")
 	if format == "" {
 		accept := c.Request().Header.Get("Accept")
@@ -312,24 +318,37 @@ func (h *Handlers) GetImageVariant(c echo.Context) error {
 		}
 	}
 
-	// Получаем фото один раз
+	// Получаем метаданные фото
 	photo, err := h.photoRepo.GetByID(photoID)
 	if err != nil {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "photo not found"})
 	}
 
-	// Если imageProcessor не инициализирован, отдаём оригинал
-	if h.imageProcessor == nil {
+	// Если width == 0 -> отдаём оригинал (для модального окна)
+	if width <= 0 {
 		reader, err := h.minioRepo.GetOriginal(c.Request().Context(), photo.FilePath)
 		if err != nil {
 			return c.JSON(http.StatusNotFound, map[string]string{"error": "original file not found"})
 		}
 		defer reader.Close()
-		data, _ := io.ReadAll(reader)
+		data, err := io.ReadAll(reader)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to read original"})
+		}
+		c.Response().Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		if photo.ContentHash != "" {
+			c.Response().Header().Set("X-Content-Hash", photo.ContentHash)
+		}
 		return c.Blob(http.StatusOK, photo.MimeType, data)
 	}
 
-	// Запрос варианта
+	// Если imageProcessor не инициализирован, отдаём ошибку
+	if h.imageProcessor == nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "image processor not available"})
+	}
+
+	// Для запросов с шириной > 0 используем JIT-трансформацию
+	// Принудительно задаём высоту на основе ширины, сохраняя пропорции (вычисляем позже)
 	data, contentType, err := h.imageProcessor.GetVariant(
 		c.Request().Context(),
 		photoID,
@@ -343,7 +362,6 @@ func (h *Handlers) GetImageVariant(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to generate variant"})
 	}
 
-	// Заголовки кэширования и валидации
 	c.Response().Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	if photo.ContentHash != "" {
 		c.Response().Header().Set("X-Content-Hash", photo.ContentHash)
